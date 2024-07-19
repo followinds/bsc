@@ -20,6 +20,7 @@ import (
 	"math/big"
 	"math/rand"
 	"sync"
+	"time"
 
 	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/ethereum/go-ethereum/common"
@@ -31,11 +32,11 @@ import (
 const (
 	// maxKnownTxs is the maximum transactions hashes to keep in the known list
 	// before starting to randomly evict them.
-	maxKnownTxs = 32768
+	maxKnownTxs = 2048
 
 	// maxKnownBlocks is the maximum block hashes to keep in the known list
 	// before starting to randomly evict them.
-	maxKnownBlocks = 1024
+	maxKnownBlocks = 128
 
 	// maxQueuedTxs is the maximum number of transactions to queue up before dropping
 	// older broadcasts.
@@ -90,9 +91,10 @@ type Peer struct {
 	reqCancel   chan *cancel   // Dispatch channel to cancel pending requests and untrack them
 	resDispatch chan *response // Dispatch channel to fulfil pending requests and untrack them
 
-	term   chan struct{} // Termination channel to stop the broadcasters
-	txTerm chan struct{} // Termination channel to stop the tx broadcasters
-	lock   sync.RWMutex  // Mutex protecting the internal fields
+	term        chan struct{} // Termination channel to stop the broadcasters
+	txTerm      chan struct{} // Termination channel to stop the tx broadcasters
+	lock        sync.RWMutex  // Mutex protecting the internal fields
+	LastMsgTime int64
 }
 
 // NewPeer creates a wrapper for a network connection and negotiated  protocol
@@ -115,6 +117,7 @@ func NewPeer(version uint, p *p2p.Peer, rw p2p.MsgReadWriter, txpool TxPool) *Pe
 		txpool:          txpool,
 		term:            make(chan struct{}),
 		txTerm:          make(chan struct{}),
+		LastMsgTime:     time.Now().Unix(),
 	}
 	// Start up all the broadcasters
 	go peer.broadcastBlocks()
@@ -499,11 +502,18 @@ func newKnownCache(max int) *knownCache {
 	}
 }
 
-// Add adds a list of elements to the set.
 func (k *knownCache) Add(hashes ...common.Hash) {
-	for k.hashes.Cardinality() > max(0, k.max-len(hashes)) {
-		k.hashes.Pop()
+	//一旦满了就全清除
+	if k.hashes.Cardinality() > max(0, k.max-len(hashes)) {
+		limit := 300
+		if k.max < 200 {
+			limit = 64
+		}
+		for k.hashes.Cardinality() > limit {
+			k.hashes.Pop()
+		}
 	}
+
 	for _, hash := range hashes {
 		k.hashes.Add(hash)
 	}

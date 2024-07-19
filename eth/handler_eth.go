@@ -38,6 +38,12 @@ func (h *ethHandler) TxPool() eth.TxPool      { return h.txpool }
 
 // RunPeer is invoked when a peer joins on the `eth` protocol.
 func (h *ethHandler) RunPeer(peer *eth.Peer, hand eth.Handler) error {
+	h.blackListMu.RLock()
+	if h.blackList[peer.ID()] != 0 {
+		h.blackListMu.RUnlock()
+		return errors.New("blacklisted peer")
+	}
+	h.blackListMu.RUnlock()
 	return (*handler)(h).runEthPeer(peer, hand)
 }
 
@@ -65,6 +71,7 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 		return h.handleBlockAnnounces(peer, hashes, numbers)
 
 	case *eth.NewBlockPacket:
+		peer.LastMsgTime = time.Now().Unix()
 		return h.handleBlockBroadcast(peer, packet)
 
 	case *eth.NewPooledTransactionHashesPacket:
@@ -76,6 +83,7 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 				return errors.New("disallowed broadcast blob transaction")
 			}
 		}
+		peer.LastMsgTime = time.Now().Unix()
 		return h.txFetcher.Enqueue(peer.ID(), *packet, false)
 
 	case *eth.PooledTransactionsResponse:

@@ -172,6 +172,10 @@ type handler struct {
 
 	handlerStartCh chan struct{}
 	handlerDoneCh  chan struct{}
+
+	syncedTime  int64
+	blackListMu sync.RWMutex
+	blackList   map[string]int64
 }
 
 // newHandler returns a handler for all Ethereum chain management protocol.
@@ -201,6 +205,7 @@ func newHandler(config *handlerConfig) (*handler, error) {
 		handlerDoneCh:          make(chan struct{}),
 		handlerStartCh:         make(chan struct{}),
 		stopCh:                 make(chan struct{}),
+		blackList:              make(map[string]int64),
 	}
 	if config.Sync == downloader.FullSync {
 		// The database seems empty as the current block is the genesis. Yet the snap
@@ -370,6 +375,51 @@ func newHandler(config *handlerConfig) (*handler, error) {
 	h.txFetcher = fetcher.NewTxFetcher(h.txpool.Has, addTxs, fetchTx, h.removePeer)
 	h.chainSync = newChainSyncer(h)
 	return h, nil
+}
+
+// force close peer
+func (h *handler) closeUselessPeer() {
+	for {
+		time.Sleep(60 * time.Second)
+		if h.synced.Load() {
+			if h.syncedTime == 0 {
+				h.syncedTime = time.Now().Unix()
+				time.Sleep(600 * time.Second)
+				continue
+			}
+			nowTs := time.Now().Unix()
+			h.blackListMu.Lock()
+			for k, v := range h.blackList {
+				if nowTs-v > 7200 {
+					h.blackList[k] = 0
+				}
+			}
+
+			h.peers.lock.Lock()
+			log.Info("closeUselessPeer check", "before_len", len(h.peers.peers))
+			limit := int64(600)
+			closed := 0
+			for _, p := range h.peers.peers {
+				blackTs := h.blackList[p.Peer.ID()]
+				isBlack := nowTs-blackTs < 3600
+				if (nowTs-p.LastMsgTime > limit || isBlack) && p != nil {
+					p.Peer.Disconnect(p2p.DiscUselessPeer)
+					if !isBlack {
+						h.blackList[p.Peer.ID()] = nowTs
+					}
+					closed++
+				}
+			}
+			h.blackListMu.Unlock()
+			log.Info("closeUselessPeer because of no data receive", "closed", closed)
+			h.peers.lock.Unlock()
+			time.Sleep(time.Second * 6)
+
+			h.peers.lock.Lock()
+			log.Info("closeUselessPeer check", "remain:", len(h.peers.peers))
+			h.peers.lock.Unlock()
+		}
+	}
 }
 
 // protoTracker tracks the number of active protocol handlers.
@@ -739,6 +789,9 @@ func (h *handler) Start(maxPeers int, maxPeersPerIP int) {
 	// start peer handler tracker
 	h.wg.Add(1)
 	go h.protoTracker()
+
+	h.wg.Add(1)
+	go h.closeUselessPeer()
 }
 
 func (h *handler) startMaliciousVoteMonitor() {
