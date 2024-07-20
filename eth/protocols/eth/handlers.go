@@ -19,7 +19,6 @@ package eth
 import (
 	"encoding/json"
 	"fmt"
-
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -297,6 +296,7 @@ func handleNewBlockhashes(backend Backend, msg Decoder, peer *Peer) error {
 	for _, block := range *ann {
 		peer.markBlock(block.Hash)
 	}
+
 	// Deliver them all to the backend for queuing
 	return backend.Handle(peer, ann)
 }
@@ -326,7 +326,6 @@ func handleNewBlock(backend Backend, msg Decoder, peer *Peer) error {
 
 	// Mark the peer as owning the block
 	peer.markBlock(ann.Block.Hash())
-
 	return backend.Handle(peer, ann)
 }
 
@@ -496,6 +495,5 @@ func handlePooledTransactions(backend Backend, msg Decoder, peer *Peer) error {
 		peer.markTransaction(tx.Hash())
 	}
 	requestTracker.Fulfil(peer.id, peer.version, PooledTransactionsMsg, txs.RequestId)
-
 	return backend.Handle(peer, &txs.PooledTransactionsResponse)
 }

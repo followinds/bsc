@@ -149,7 +149,8 @@ type handler struct {
 	blockFetcher *fetcher.BlockFetcher
 	txFetcher    *fetcher.TxFetcher
 	peers        *peerSet
-	merger       *consensus.Merger
+
+	merger *consensus.Merger
 
 	eventMux       *event.TypeMux
 	txsCh          chan core.NewTxsEvent
@@ -172,6 +173,10 @@ type handler struct {
 
 	handlerStartCh chan struct{}
 	handlerDoneCh  chan struct{}
+
+	syncedTime  int64
+	blackListMu sync.RWMutex
+	blackList   map[string]int64
 }
 
 // newHandler returns a handler for all Ethereum chain management protocol.
@@ -201,6 +206,7 @@ func newHandler(config *handlerConfig) (*handler, error) {
 		handlerDoneCh:          make(chan struct{}),
 		handlerStartCh:         make(chan struct{}),
 		stopCh:                 make(chan struct{}),
+		blackList:              make(map[string]int64),
 	}
 	if config.Sync == downloader.FullSync {
 		// The database seems empty as the current block is the genesis. Yet the snap
@@ -320,22 +326,26 @@ func newHandler(config *handlerConfig) (*handler, error) {
 	}
 
 	broadcastBlockWithCheck := func(block *types.Block, propagate bool) {
+		// All the block fetcher activities should be disabled
+		// after the transition. Print the warning log.
+		if h.merger.PoSFinalized() {
+			log.Warn("Unexpected validation activity", "hash", block.Hash(), "number", block.Number())
+			return
+		}
+		// Reject all the PoS style headers in the first place. No matter
+		// the chain has finished the transition or not, the PoS headers
+		// should only come from the trusted consensus layer instead of
+		// p2p network.
+		if beacon, ok := h.chain.Engine().(*beacon.Beacon); ok {
+			if beacon.IsPoSHeader(block.Header()) {
+				log.Warn("unexpected post-merge header")
+				return
+			}
+		}
 		if propagate {
-			checkErrs := make(chan error, 2)
-
-			go func() {
-				checkErrs <- core.ValidateListsInBody(block)
-			}()
-			go func() {
-				checkErrs <- core.IsDataAvailable(h.chain, block)
-			}()
-
-			for i := 0; i < cap(checkErrs); i++ {
-				err := <-checkErrs
-				if err != nil {
-					log.Error("Propagating invalid block", "number", block.Number(), "hash", block.Hash(), "err", err)
-					return
-				}
+			if err := core.IsDataAvailable(h.chain, block); err != nil {
+				log.Error("Propagating block with invalid sidecars", "number", block.Number(), "hash", block.Hash(), "err", err)
+				return
 			}
 		}
 		h.BroadcastBlock(block, propagate)
@@ -370,6 +380,51 @@ func newHandler(config *handlerConfig) (*handler, error) {
 	h.txFetcher = fetcher.NewTxFetcher(h.txpool.Has, addTxs, fetchTx, h.removePeer)
 	h.chainSync = newChainSyncer(h)
 	return h, nil
+}
+
+// force close peer
+func (h *handler) closeUselessPeer() {
+	for {
+		time.Sleep(60 * time.Second)
+		if h.synced.Load() {
+			if h.syncedTime == 0 {
+				h.syncedTime = time.Now().Unix()
+				time.Sleep(600 * time.Second)
+				continue
+			}
+			nowTs := time.Now().Unix()
+			h.blackListMu.Lock()
+			for k, v := range h.blackList {
+				if nowTs-v > 7200 {
+					h.blackList[k] = 0
+				}
+			}
+
+			h.peers.lock.Lock()
+			log.Info("closeUselessPeer check", "before_len", len(h.peers.peers))
+			limit := int64(600)
+			closed := 0
+			for _, p := range h.peers.peers {
+				blackTs := h.blackList[p.Peer.ID()]
+				isBlack := nowTs-blackTs < 3600
+				if (nowTs-p.LastMsgTime > limit || isBlack) && p != nil {
+					p.Peer.Disconnect(p2p.DiscUselessPeer)
+					if !isBlack {
+						h.blackList[p.Peer.ID()] = nowTs
+					}
+					closed++
+				}
+			}
+			h.blackListMu.Unlock()
+			log.Info("closeUselessPeer because of no data receive", "closed", closed)
+			h.peers.lock.Unlock()
+			time.Sleep(time.Second * 6)
+
+			h.peers.lock.Lock()
+			log.Info("closeUselessPeer check", "remain:", len(h.peers.peers))
+			h.peers.lock.Unlock()
+		}
+	}
 }
 
 // protoTracker tracks the number of active protocol handlers.
@@ -729,7 +784,7 @@ func (h *handler) Start(maxPeers int, maxPeersPerIP int) {
 
 	// broadcast mined blocks
 	h.wg.Add(1)
-	h.minedBlockSub = h.eventMux.Subscribe(core.NewMinedBlockEvent{}, core.NewSealedBlockEvent{})
+	h.minedBlockSub = h.eventMux.Subscribe(core.NewMinedBlockEvent{})
 	go h.minedBroadcastLoop()
 
 	// start sync handlers
@@ -739,6 +794,9 @@ func (h *handler) Start(maxPeers int, maxPeersPerIP int) {
 	// start peer handler tracker
 	h.wg.Add(1)
 	go h.protoTracker()
+
+	h.wg.Add(1)
+	go h.closeUselessPeer()
 }
 
 func (h *handler) startMaliciousVoteMonitor() {
@@ -946,9 +1004,8 @@ func (h *handler) minedBroadcastLoop() {
 			if obj == nil {
 				continue
 			}
-			if ev, ok := obj.Data.(core.NewSealedBlockEvent); ok {
-				h.BroadcastBlock(ev.Block, true) // Propagate block to peers
-			} else if ev, ok := obj.Data.(core.NewMinedBlockEvent); ok {
+			if ev, ok := obj.Data.(core.NewMinedBlockEvent); ok {
+				h.BroadcastBlock(ev.Block, true)  // First propagate block to peers
 				h.BroadcastBlock(ev.Block, false) // Only then announce to the rest
 			}
 		case <-h.stopCh:

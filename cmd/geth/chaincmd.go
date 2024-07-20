@@ -62,9 +62,9 @@ var (
 		ArgsUsage: "<genesisPath>",
 		Flags: flags.Merge([]cli.Flag{
 			utils.CachePreimagesFlag,
-			utils.OverrideBohr,
+			utils.OverrideCancun,
+			utils.OverrideHaber,
 			utils.OverrideVerkle,
-			utils.MultiDataBaseFlag,
 		}, utils.DatabaseFlags),
 		Description: `
 The init command initializes a new genesis block and definition for the network.
@@ -253,9 +253,13 @@ func initGenesis(ctx *cli.Context) error {
 	defer stack.Close()
 
 	var overrides core.ChainOverrides
-	if ctx.IsSet(utils.OverrideBohr.Name) {
-		v := ctx.Uint64(utils.OverrideBohr.Name)
-		overrides.OverrideBohr = &v
+	if ctx.IsSet(utils.OverrideCancun.Name) {
+		v := ctx.Uint64(utils.OverrideCancun.Name)
+		overrides.OverrideCancun = &v
+	}
+	if ctx.IsSet(utils.OverrideHaber.Name) {
+		v := ctx.Uint64(utils.OverrideHaber.Name)
+		overrides.OverrideHaber = &v
 	}
 	if ctx.IsSet(utils.OverrideVerkle.Name) {
 		v := ctx.Uint64(utils.OverrideVerkle.Name)
@@ -760,7 +764,7 @@ func parseDumpConfig(ctx *cli.Context, stack *node.Node) (*state.DumpConfig, eth
 		arg := ctx.Args().First()
 		if hashish(arg) {
 			hash := common.HexToHash(arg)
-			if number := rawdb.ReadHeaderNumber(db, hash); number != nil {
+			if number := rawdb.ReadHeaderNumber(db.BlockStore(), hash); number != nil {
 				header = rawdb.ReadHeader(db, hash, *number)
 			} else {
 				return nil, nil, common.Hash{}, fmt.Errorf("block %x not found", hash)

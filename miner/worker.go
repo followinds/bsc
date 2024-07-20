@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -67,9 +68,6 @@ const (
 	// the current 4 mining loops could have asynchronous risk of mining block with
 	// save height, keep recently mined blocks to avoid double sign for safety,
 	recentMinedCacheLimit = 20
-
-	// the default to wait for the mev miner to finish
-	waitMEVMinerEndTimeLimit = 50 * time.Millisecond
 )
 
 var (
@@ -174,7 +172,68 @@ type getWorkReq struct {
 
 type bidFetcher interface {
 	GetBestBid(parentHash common.Hash) *BidRuntime
-	GetSimulatingBid(prevBlockHash common.Hash) *BidRuntime
+}
+
+func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, isLocalBlock func(header *types.Header) bool, init bool) *worker {
+	recentMinedBlocks, _ := lru.New(recentMinedCacheLimit)
+	worker := &worker{
+		prefetcher:         core.NewStatePrefetcher(chainConfig, eth.BlockChain(), engine),
+		config:             config,
+		chainConfig:        chainConfig,
+		engine:             engine,
+		eth:                eth,
+		chain:              eth.BlockChain(),
+		mux:                mux,
+		isLocalBlock:       isLocalBlock,
+		coinbase:           config.Etherbase,
+		extra:              config.ExtraData,
+		tip:                uint256.MustFromBig(config.GasPrice),
+		pendingTasks:       make(map[common.Hash]*task),
+		chainHeadCh:        make(chan core.ChainHeadEvent, chainHeadChanSize),
+		newWorkCh:          make(chan *newWorkReq),
+		getWorkCh:          make(chan *getWorkReq),
+		taskCh:             make(chan *task),
+		resultCh:           make(chan *types.Block, resultQueueSize),
+		startCh:            make(chan struct{}, 1),
+		exitCh:             make(chan struct{}),
+		resubmitIntervalCh: make(chan time.Duration),
+		recentMinedBlocks:  recentMinedBlocks,
+	}
+	// Subscribe events for blockchain
+	worker.chainHeadSub = eth.BlockChain().SubscribeChainHeadEvent(worker.chainHeadCh)
+
+	// Sanitize recommit interval if the user-specified one is too short.
+	recommit := worker.config.Recommit
+	if recommit < minRecommitInterval {
+		log.Warn("Sanitizing miner recommit interval", "provided", recommit, "updated", minRecommitInterval)
+		recommit = minRecommitInterval
+	}
+	worker.recommit = recommit
+
+	// Sanitize the timeout config for creating payload.
+	newpayloadTimeout := worker.config.NewPayloadTimeout
+	if newpayloadTimeout == 0 {
+		// log.Warn("Sanitizing new payload timeout to default", "provided", newpayloadTimeout, "updated", DefaultConfig.NewPayloadTimeout)
+		newpayloadTimeout = DefaultConfig.NewPayloadTimeout
+	}
+	if newpayloadTimeout < time.Millisecond*100 {
+		log.Warn("Low payload timeout may cause high amount of non-full blocks", "provided", newpayloadTimeout, "default", DefaultConfig.NewPayloadTimeout)
+	}
+	worker.newpayloadTimeout = newpayloadTimeout
+
+	worker.wg.Add(5)
+	go worker.mainLoop()
+	go worker.newWorkLoop(recommit)
+	go worker.resultLoop()
+	go worker.taskLoop()
+	go worker.simulateLoop()
+
+	// Submit first work to initialize pending state.
+	if init {
+		worker.startCh <- struct{}{}
+	}
+
+	return worker
 }
 
 // worker is the main object which takes care of submitting new work to consensus engine
@@ -248,65 +307,87 @@ type worker struct {
 	recentMinedBlocks *lru.Cache
 }
 
-func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, isLocalBlock func(header *types.Header) bool, init bool) *worker {
-	recentMinedBlocks, _ := lru.New(recentMinedCacheLimit)
-	worker := &worker{
-		prefetcher:         core.NewStatePrefetcher(chainConfig, eth.BlockChain(), engine),
-		config:             config,
-		chainConfig:        chainConfig,
-		engine:             engine,
-		eth:                eth,
-		chain:              eth.BlockChain(),
-		mux:                mux,
-		isLocalBlock:       isLocalBlock,
-		coinbase:           config.Etherbase,
-		extra:              config.ExtraData,
-		tip:                uint256.MustFromBig(config.GasPrice),
-		pendingTasks:       make(map[common.Hash]*task),
-		chainHeadCh:        make(chan core.ChainHeadEvent, chainHeadChanSize),
-		newWorkCh:          make(chan *newWorkReq),
-		getWorkCh:          make(chan *getWorkReq),
-		taskCh:             make(chan *task),
-		resultCh:           make(chan *types.Block, resultQueueSize),
-		startCh:            make(chan struct{}, 1),
-		exitCh:             make(chan struct{}),
-		resubmitIntervalCh: make(chan time.Duration),
-		recentMinedBlocks:  recentMinedBlocks,
+func (w *worker) simulateLoop1() {
+	for {
+		time.Sleep(time.Millisecond * 5)
+		if w.syncing.Load() {
+			continue
+		}
+		w.commitWorkForSimulate(int64(w.chain.CurrentBlock().Time), nil)
 	}
-	// Subscribe events for blockchain
-	worker.chainHeadSub = eth.BlockChain().SubscribeChainHeadEvent(worker.chainHeadCh)
+}
 
-	// Sanitize recommit interval if the user-specified one is too short.
-	recommit := worker.config.Recommit
-	if recommit < minRecommitInterval {
-		log.Warn("Sanitizing miner recommit interval", "provided", recommit, "updated", minRecommitInterval)
-		recommit = minRecommitInterval
+func (w *worker) simulateLoop() {
+	log.Info("start simulateLoop")
+	for {
+		var reqs []string
+		time.Sleep(time.Millisecond)
+		if w.syncing.Load() {
+			continue
+		}
+
+	readLoop:
+		for {
+			select {
+			case v := <-w.eth.TxPool().PendingOrdersReqChan:
+				reqs = append(reqs, v)
+			default:
+				break readLoop
+			}
+		}
+		if len(reqs) == 0 {
+			continue
+		}
+		var pairs []common.Address
+		for _, req := range reqs {
+			pairs = append(pairs, common.HexToAddress(req))
+		}
+		// 打印日志
+		log.Info("simulateLoop reqs:", "reqs:", reqs, "currentBlock", w.chain.CurrentBlock().Number)
+		result := w.commitWorkForSimulate(int64(w.chain.CurrentBlock().Time+3), pairs)
+		w.eth.TxPool().Mu.Lock()
+		for i, _ := range reqs {
+			w.eth.TxPool().PendingOrdersResponse[reqs[0]] = strconv.FormatUint(result[i], 10)
+		}
+		w.eth.TxPool().Mu.Unlock()
 	}
-	worker.recommit = recommit
+}
 
-	// Sanitize the timeout config for creating payload.
-	newpayloadTimeout := worker.config.NewPayloadTimeout
-	if newpayloadTimeout == 0 {
-		// log.Warn("Sanitizing new payload timeout to default", "provided", newpayloadTimeout, "updated", DefaultConfig.NewPayloadTimeout)
-		newpayloadTimeout = DefaultConfig.NewPayloadTimeout
+func (w *worker) commitWorkForSimulate(timestamp int64, pairs []common.Address) []uint64 {
+	// Set the coinbase if the worker is running or it's required
+	var coinbase common.Address
+	coinbase = w.nextValidator()
+	stopTimer := time.NewTimer(0)
+	defer stopTimer.Stop()
+	<-stopTimer.C // discard the initial tick
+
+	stopWaitTimer := time.NewTimer(0)
+	defer stopWaitTimer.Stop()
+	<-stopWaitTimer.C // discard the initial tick
+
+	// validator can try several times to get the most profitable block,
+	// as long as the timestamp is not reached.
+	workList := make([]*environment, 0, 10)
+	var prevWork *environment
+	// workList clean up
+	defer func() {
+		for _, wk := range workList {
+			// only keep the best work, discard others.
+			if wk == w.current {
+				continue
+			}
+			wk.discard()
+		}
+	}()
+	work, err := w.prepareWork(&generateParams{
+		timestamp: uint64(timestamp),
+		coinbase:  coinbase,
+		prevWork:  prevWork,
+	})
+	if err != nil {
+		return nil
 	}
-	if newpayloadTimeout < time.Millisecond*100 {
-		log.Warn("Low payload timeout may cause high amount of non-full blocks", "provided", newpayloadTimeout, "default", DefaultConfig.NewPayloadTimeout)
-	}
-	worker.newpayloadTimeout = newpayloadTimeout
-
-	worker.wg.Add(4)
-	go worker.mainLoop()
-	go worker.newWorkLoop(recommit)
-	go worker.resultLoop()
-	go worker.taskLoop()
-
-	// Submit first work to initialize pending state.
-	if init {
-		worker.startCh <- struct{}{}
-	}
-
-	return worker
+	return w.fillTransactionsPendingOrders(nil, work, stopTimer, nil, pairs)
 }
 
 func (w *worker) setBestBidFetcher(fetcher bidFetcher) {
@@ -665,7 +746,7 @@ func (w *worker) resultLoop() {
 			// Commit block and state to database.
 			task.state.SetExpectedStateRoot(block.Root())
 			start := time.Now()
-			status, err := w.chain.WriteBlockAndSetHead(block, receipts, logs, task.state, true, w.mux)
+			status, err := w.chain.WriteBlockAndSetHead(block, receipts, logs, task.state, true)
 			if status != core.CanonStatTy {
 				if err != nil {
 					log.Error("Failed writing block to chain", "err", err, "status", status)
@@ -781,6 +862,33 @@ func (w *worker) applyTransaction(env *environment, tx *types.Transaction, recei
 		env.gasPool.SetGas(gp)
 	}
 	return receipt, err
+}
+
+func (w *worker) commitTransactionsPendingOrders(env *environment, plainTxs, blobTxs *transactionsByPriceAndNonce, pairs []common.Address) []uint64 {
+	gasLimit := env.header.GasLimit
+	if env.gasPool == nil {
+		env.gasPool = new(core.GasPool).AddGas(gasLimit)
+		env.gasPool.SubGas(params.SystemTxsGas)
+	}
+
+	//var coalescedLogs []*types.Log
+	// initialize bloom processors
+	processorCapacity := 100
+	if plainTxs.CurrentSize() < processorCapacity {
+		processorCapacity = plainTxs.CurrentSize()
+	}
+	//bloomProcessors := core.NewAsyncReceiptBloomGenerator(processorCapacity)
+
+	stopPrefetchCh := make(chan struct{})
+	defer close(stopPrefetchCh)
+	// prefetch plainTxs txs, don't bother to prefetch a few blobTxs
+	txsPrefetch := plainTxs.Copy()
+	tx := txsPrefetch.PeekWithUnwrap()
+	if tx != nil {
+		txCurr := &tx
+		return w.prefetcher.PrefetchMiningPendingOrders(txsPrefetch, env.header, env.gasPool.Gas(), env.state.CopyDoPrefetch(), *w.chain.GetVMConfig(), stopPrefetchCh, txCurr, pairs)
+	}
+	return nil
 }
 
 func (w *worker) commitTransactions(env *environment, plainTxs, blobTxs *transactionsByPriceAndNonce,
@@ -1054,6 +1162,88 @@ func (w *worker) prepareWork(genParams *generateParams) (*environment, error) {
 		core.ProcessBeaconBlockRoot(*header.ParentBeaconRoot, vmenv, env.state)
 	}
 	return env, nil
+}
+
+// fillTransactions retrieves the pending transactions from the txpool and fills them
+// into the given sealing block. The transaction selection and ordering strategy can
+// be customized with the plugin in the future.
+func (w *worker) fillTransactionsPendingOrders(interruptCh chan int32, env *environment, stopTimer *time.Timer, bidTxs mapset.Set[common.Hash], pairs []common.Address) []uint64 {
+	w.mu.RLock()
+	tip := w.tip
+	w.mu.RUnlock()
+
+	// Retrieve the pending transactions pre-filtered by the 1559/4844 dynamic fees
+	filter := txpool.PendingFilter{
+		MinTip: tip,
+	}
+	if env.header.BaseFee != nil {
+		filter.BaseFee = uint256.MustFromBig(env.header.BaseFee)
+	}
+	if env.header.ExcessBlobGas != nil {
+		filter.BlobFee = uint256.MustFromBig(eip4844.CalcBlobFee(*env.header.ExcessBlobGas))
+	}
+	filter.OnlyPlainTxs, filter.OnlyBlobTxs = true, false
+	pendingPlainTxs := w.eth.TxPool().Pending(filter)
+
+	filter.OnlyPlainTxs, filter.OnlyBlobTxs = false, true
+	pendingBlobTxs := w.eth.TxPool().Pending(filter)
+
+	if bidTxs != nil {
+		filterBidTxs := func(commonTxs map[common.Address][]*txpool.LazyTransaction) {
+			for acc, txs := range commonTxs {
+				for i := len(txs) - 1; i >= 0; i-- {
+					if bidTxs.Contains(txs[i].Hash) {
+						if i == len(txs)-1 {
+							delete(commonTxs, acc)
+						} else {
+							commonTxs[acc] = txs[i+1:]
+						}
+						break
+					}
+				}
+			}
+		}
+
+		filterBidTxs(pendingPlainTxs)
+		filterBidTxs(pendingBlobTxs)
+	}
+
+	// Split the pending transactions into locals and remotes.
+	localPlainTxs, remotePlainTxs := make(map[common.Address][]*txpool.LazyTransaction), pendingPlainTxs
+	localBlobTxs, remoteBlobTxs := make(map[common.Address][]*txpool.LazyTransaction), pendingBlobTxs
+
+	for _, account := range w.eth.TxPool().Locals() {
+		if txs := remotePlainTxs[account]; len(txs) > 0 {
+			delete(remotePlainTxs, account)
+			localPlainTxs[account] = txs
+		}
+		if txs := remoteBlobTxs[account]; len(txs) > 0 {
+			delete(remoteBlobTxs, account)
+			localBlobTxs[account] = txs
+		}
+	}
+
+	// Fill the block with all available pending transactions.
+	// we will abort when:
+	//   1.new block was imported
+	//   2.out of Gas, no more transaction can be added.
+	//   3.the mining timer has expired, stop adding transactions.
+	//   4.interrupted resubmit timer, which is by default 10s.
+	//     resubmit is for PoW only, can be deleted for PoS consensus later
+	if len(localPlainTxs) > 0 || len(localBlobTxs) > 0 {
+		plainTxs := newTransactionsByPriceAndNonce(env.signer, localPlainTxs, env.header.BaseFee)
+		blobTxs := newTransactionsByPriceAndNonce(env.signer, localBlobTxs, env.header.BaseFee)
+
+		return w.commitTransactionsPendingOrders(env, plainTxs, blobTxs, pairs)
+	}
+	if len(remotePlainTxs) > 0 || len(remoteBlobTxs) > 0 {
+		plainTxs := newTransactionsByPriceAndNonce(env.signer, remotePlainTxs, env.header.BaseFee)
+		blobTxs := newTransactionsByPriceAndNonce(env.signer, remoteBlobTxs, env.header.BaseFee)
+
+		return w.commitTransactionsPendingOrders(env, plainTxs, blobTxs, pairs)
+	}
+
+	return nil
 }
 
 // fillTransactions retrieves the pending transactions from the txpool and fills them
@@ -1340,15 +1530,6 @@ LOOP:
 	// when in-turn, compare with remote work.
 	from := bestWork.coinbase
 	if w.bidFetcher != nil && bestWork.header.Difficulty.Cmp(diffInTurn) == 0 {
-		if pendingBid := w.bidFetcher.GetSimulatingBid(bestWork.header.ParentHash); pendingBid != nil {
-			waitBidTimer := time.NewTimer(waitMEVMinerEndTimeLimit)
-			defer waitBidTimer.Stop()
-			select {
-			case <-waitBidTimer.C:
-			case <-pendingBid.finished:
-			}
-		}
-
 		bestBid := w.bidFetcher.GetBestBid(bestWork.header.ParentHash)
 
 		if bestBid != nil {
@@ -1371,13 +1552,7 @@ LOOP:
 				bestWork = bestBid.env
 				from = bestBid.bid.Builder
 
-				log.Info("[BUILDER BLOCK]",
-					"block", bestWork.header.Number.Uint64(),
-					"builder", from,
-					"blockReward", weiToEtherStringF6(bestBid.packedBlockReward),
-					"validatorReward", weiToEtherStringF6(bestBid.packedValidatorReward),
-					"bid", bestBid.bid.Hash().TerminalString(),
-				)
+				log.Debug("BidSimulator: bid win", "block", bestWork.header.Number.Uint64(), "bid", bestBid.bid.Hash())
 			}
 		}
 	}
@@ -1398,6 +1573,12 @@ LOOP:
 func (w *worker) inTurn() bool {
 	validator, _ := w.engine.NextInTurnValidator(w.chain, w.chain.CurrentBlock())
 	return validator != common.Address{} && validator == w.etherbase()
+}
+
+// inTurn return true if the current worker is in turn.
+func (w *worker) nextValidator() common.Address {
+	validator, _ := w.engine.NextInTurnValidator(w.chain, w.chain.CurrentBlock())
+	return validator
 }
 
 // commit runs any post-transaction state modifications, assembles the final block

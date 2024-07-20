@@ -231,7 +231,7 @@ func (bc *BlockChain) GetReceiptsByHash(hash common.Hash) types.Receipts {
 	if receipts, ok := bc.receiptsCache.Get(hash); ok {
 		return receipts
 	}
-	number := rawdb.ReadHeaderNumber(bc.db, hash)
+	number := rawdb.ReadHeaderNumber(bc.db.BlockStore(), hash)
 	if number == nil {
 		return nil
 	}
@@ -510,13 +510,4 @@ func (bc *BlockChain) SubscribeBlockProcessingEvent(ch chan<- bool) event.Subscr
 // SubscribeFinalizedHeaderEvent registers a subscription of FinalizedHeaderEvent.
 func (bc *BlockChain) SubscribeFinalizedHeaderEvent(ch chan<- FinalizedHeaderEvent) event.Subscription {
 	return bc.scope.Track(bc.finalizedHeaderFeed.Subscribe(ch))
-}
-
-// AncientTail retrieves the tail the ancients blocks
-func (bc *BlockChain) AncientTail() (uint64, error) {
-	tail, err := bc.db.BlockStore().Tail()
-	if err != nil {
-		return 0, err
-	}
-	return tail, nil
 }

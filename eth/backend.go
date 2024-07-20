@@ -161,18 +161,12 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	// Optimize memory distribution by reallocating surplus allowance from the
 	// dirty cache to the clean cache.
 	if config.StateScheme == rawdb.PathScheme && config.TrieDirtyCache > pathdb.MaxDirtyBufferSize/1024/1024 {
-		log.Info("Capped dirty cache size", "provided", common.StorageSize(config.TrieDirtyCache)*1024*1024,
-			"adjusted", common.StorageSize(pathdb.MaxDirtyBufferSize))
-		log.Info("Clean cache size", "provided", common.StorageSize(config.TrieCleanCache)*1024*1024,
-			"adjusted", common.StorageSize(config.TrieCleanCache+config.TrieDirtyCache-pathdb.MaxDirtyBufferSize/1024/1024)*1024*1024)
-		config.TrieCleanCache += config.TrieDirtyCache - pathdb.MaxDirtyBufferSize/1024/1024
+		log.Info("Capped dirty cache size", "provided", common.StorageSize(config.TrieDirtyCache)*1024*1024, "adjusted", common.StorageSize(pathdb.MaxDirtyBufferSize))
+		log.Info("Clean cache size", "provided", common.StorageSize(config.TrieCleanCache)*1024*1024)
 		config.TrieDirtyCache = pathdb.MaxDirtyBufferSize / 1024 / 1024
 	}
-	log.Info("Allocated memory caches",
-		"state_scheme", config.StateScheme,
-		"trie_clean_cache", common.StorageSize(config.TrieCleanCache)*1024*1024,
-		"trie_dirty_cache", common.StorageSize(config.TrieDirtyCache)*1024*1024,
-		"snapshot_cache", common.StorageSize(config.SnapshotCache)*1024*1024)
+	log.Info("Allocated trie memory caches", "clean", common.StorageSize(config.TrieCleanCache)*1024*1024, "dirty", common.StorageSize(config.TrieDirtyCache)*1024*1024)
+
 	// Try to recover offline state pruning only in hash-based.
 	if config.StateScheme == rawdb.HashScheme {
 		if err := pruner.RecoverPruning(stack.ResolvePath(""), chainDb, config.TriesInMemory); err != nil {
@@ -185,9 +179,13 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	}
 	// Override the chain config with provided settings.
 	var overrides core.ChainOverrides
-	if config.OverrideBohr != nil {
-		chainConfig.BohrTime = config.OverrideBohr
-		overrides.OverrideBohr = config.OverrideBohr
+	if config.OverrideCancun != nil {
+		chainConfig.CancunTime = config.OverrideCancun
+		overrides.OverrideCancun = config.OverrideCancun
+	}
+	if config.OverrideHaber != nil {
+		chainConfig.HaberTime = config.OverrideHaber
+		overrides.OverrideHaber = config.OverrideHaber
 	}
 	if config.OverrideVerkle != nil {
 		chainConfig.VerkleTime = config.OverrideVerkle
@@ -221,8 +219,7 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		p2pServer:         stack.Server(),
 		shutdownTracker:   shutdowncheck.NewShutdownTracker(chainDb),
 	}
-
-	eth.APIBackend = &EthAPIBackend{stack.Config().ExtRPCEnabled(), stack.Config().AllowUnprotectedTxs, eth, nil}
+	eth.APIBackend = &EthAPIBackend{extRPCEnabled: stack.Config().ExtRPCEnabled(), allowUnprotectedTxs: stack.Config().AllowUnprotectedTxs, eth: eth, gpo: nil}
 	if eth.APIBackend.allowUnprotectedTxs {
 		log.Info("Unprotected transactions allowed")
 	}

@@ -216,7 +216,8 @@ func (e *GenesisMismatchError) Error() string {
 // ChainOverrides contains the changes to chain config
 // Typically, these modifications involve hardforks that are not enabled on the BSC mainnet, intended for testing purposes.
 type ChainOverrides struct {
-	OverrideBohr   *uint64
+	OverrideCancun *uint64
+	OverrideHaber  *uint64
 	OverrideVerkle *uint64
 }
 
@@ -243,8 +244,11 @@ func SetupGenesisBlockWithOverride(db ethdb.Database, triedb *triedb.Database, g
 	}
 	applyOverrides := func(config *params.ChainConfig) {
 		if config != nil {
-			if overrides != nil && overrides.OverrideBohr != nil {
-				config.BohrTime = overrides.OverrideBohr
+			if overrides != nil && overrides.OverrideCancun != nil {
+				config.CancunTime = overrides.OverrideCancun
+			}
+			if overrides != nil && overrides.OverrideHaber != nil {
+				config.HaberTime = overrides.OverrideHaber
 			}
 			if overrides != nil && overrides.OverrideVerkle != nil {
 				config.VerkleTime = overrides.OverrideVerkle
@@ -490,7 +494,7 @@ func (g *Genesis) Commit(db ethdb.Database, triedb *triedb.Database) (*types.Blo
 	rawdb.WriteReceipts(db.BlockStore(), block.Hash(), block.NumberU64(), nil)
 	rawdb.WriteCanonicalHash(db.BlockStore(), block.Hash(), block.NumberU64())
 	rawdb.WriteHeadBlockHash(db.BlockStore(), block.Hash())
-	rawdb.WriteHeadFastBlockHash(db.BlockStore(), block.Hash())
+	rawdb.WriteHeadFastBlockHash(db, block.Hash())
 	rawdb.WriteHeadHeaderHash(db.BlockStore(), block.Hash())
 	rawdb.WriteChainConfig(db, block.Hash(), config)
 	return block, nil

@@ -44,10 +44,6 @@ func (db *Database) BlockStore() ethdb.Database {
 	return db
 }
 
-func (db *Database) HasSeparateBlockStore() bool {
-	return false
-}
-
 func (db *Database) SetBlockStore(block ethdb.Database) {
 	panic("not supported")
 }
@@ -119,10 +115,6 @@ func (db *Database) StateStore() ethdb.Database {
 }
 
 func (db *Database) SetStateStore(state ethdb.Database) {
-	panic("not supported")
-}
-
-func (db *Database) GetStateStore() ethdb.Database {
 	panic("not supported")
 }
 

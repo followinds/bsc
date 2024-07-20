@@ -75,7 +75,7 @@ func NewLevelDBDatabaseWithFreezer(file string, cache int, handles int, ancient 
 	if err != nil {
 		return nil, err
 	}
-	frdb, err := rawdb.NewDatabaseWithFreezer(kvdb, ancient, namespace, readonly, disableFreeze, isLastOffset, pruneAncientData, false)
+	frdb, err := rawdb.NewDatabaseWithFreezer(kvdb, ancient, namespace, readonly, disableFreeze, isLastOffset, pruneAncientData)
 	if err != nil {
 		kvdb.Close()
 		return nil, err
@@ -155,12 +155,6 @@ func BlockchainCreator(t *testing.T, chaindbPath, AncientPath string, blockRemai
 	triedb := triedb.NewDatabase(db, nil)
 	defer triedb.Close()
 
-	if err = db.SetupFreezerEnv(&ethdb.FreezerEnv{
-		ChainCfg:         gspec.Config,
-		BlobExtraReserve: params.DefaultExtraReserveForBlobRequests,
-	}); err != nil {
-		t.Fatalf("Failed to create chain: %v", err)
-	}
 	genesis := gspec.MustCommit(db, triedb)
 	// Initialize a fresh chain with only a genesis block
 	blockchain, err := core.NewBlockChain(db, config, gspec, nil, engine, vm.Config{}, nil, nil)
@@ -184,10 +178,11 @@ func BlockchainCreator(t *testing.T, chaindbPath, AncientPath string, blockRemai
 
 	// Force run a freeze cycle
 	type freezer interface {
-		Freeze(threshold uint64) error
+		Freeze() error
 		Ancients() (uint64, error)
 	}
-	db.(freezer).Freeze(10)
+	blockchain.SetFinalized(blocks[len(blocks)-1].Header())
+	db.(freezer).Freeze()
 
 	frozen, err := db.Ancients()
 	//make sure there're frozen items

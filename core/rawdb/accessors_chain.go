@@ -34,15 +34,6 @@ import (
 	"golang.org/x/exp/slices"
 )
 
-// Support Multi-Database Based on Data Pattern, the Chaindata will be divided into three stores: BlockStore, StateStore, and ChainStore,
-// according to data schema and read/write behavior. When using the following data interfaces, you should take note of the following:
-//
-// 1) Block-Related Data: For CanonicalHash, Header, Body, Td, Receipts, and BlobSidecars, the Write, Delete, and Iterator
-// 	operations should carefully ensure that the database being used is BlockStore.
-// 2) Meta-Related Data: For HeaderNumber, HeadHeaderHash, HeadBlockHash, HeadFastBlockHash, and FinalizedBlockHash, the
-// 	Write and Delete operations should carefully ensure that the database being used is BlockStore.
-// 3) Ancient Data: When using a multi-database, Ancient data will use the BlockStore.
-
 // ReadCanonicalHash retrieves the hash assigned to a canonical block number.
 func ReadCanonicalHash(db ethdb.Reader, number uint64) common.Hash {
 	var data []byte
@@ -153,8 +144,8 @@ func ReadAllCanonicalHashes(db ethdb.Iteratee, from uint64, to uint64, limit int
 }
 
 // ReadHeaderNumber returns the header number assigned to a hash.
-func ReadHeaderNumber(db ethdb.MultiDatabaseReader, hash common.Hash) *uint64 {
-	data, _ := db.BlockStoreReader().Get(headerNumberKey(hash))
+func ReadHeaderNumber(db ethdb.KeyValueReader, hash common.Hash) *uint64 {
+	data, _ := db.Get(headerNumberKey(hash))
 	if len(data) != 8 {
 		return nil
 	}
@@ -179,8 +170,8 @@ func DeleteHeaderNumber(db ethdb.KeyValueWriter, hash common.Hash) {
 }
 
 // ReadHeadHeaderHash retrieves the hash of the current canonical head header.
-func ReadHeadHeaderHash(db ethdb.MultiDatabaseReader) common.Hash {
-	data, _ := db.BlockStoreReader().Get(headHeaderKey)
+func ReadHeadHeaderHash(db ethdb.KeyValueReader) common.Hash {
+	data, _ := db.Get(headHeaderKey)
 	if len(data) == 0 {
 		return common.Hash{}
 	}
@@ -195,8 +186,8 @@ func WriteHeadHeaderHash(db ethdb.KeyValueWriter, hash common.Hash) {
 }
 
 // ReadHeadBlockHash retrieves the hash of the current canonical head block.
-func ReadHeadBlockHash(db ethdb.MultiDatabaseReader) common.Hash {
-	data, _ := db.BlockStoreReader().Get(headBlockKey)
+func ReadHeadBlockHash(db ethdb.KeyValueReader) common.Hash {
+	data, _ := db.Get(headBlockKey)
 	if len(data) == 0 {
 		return common.Hash{}
 	}
@@ -211,8 +202,8 @@ func WriteHeadBlockHash(db ethdb.KeyValueWriter, hash common.Hash) {
 }
 
 // ReadHeadFastBlockHash retrieves the hash of the current fast-sync head block.
-func ReadHeadFastBlockHash(db ethdb.MultiDatabaseReader) common.Hash {
-	data, _ := db.BlockStoreReader().Get(headFastBlockKey)
+func ReadHeadFastBlockHash(db ethdb.KeyValueReader) common.Hash {
+	data, _ := db.Get(headFastBlockKey)
 	if len(data) == 0 {
 		return common.Hash{}
 	}
@@ -227,8 +218,8 @@ func WriteHeadFastBlockHash(db ethdb.KeyValueWriter, hash common.Hash) {
 }
 
 // ReadFinalizedBlockHash retrieves the hash of the finalized block.
-func ReadFinalizedBlockHash(db ethdb.MultiDatabaseReader) common.Hash {
-	data, _ := db.BlockStoreReader().Get(headFinalizedBlockKey)
+func ReadFinalizedBlockHash(db ethdb.KeyValueReader) common.Hash {
+	data, _ := db.Get(headFinalizedBlockKey)
 	if len(data) == 0 {
 		return common.Hash{}
 	}
@@ -306,7 +297,7 @@ func ReadHeaderRange(db ethdb.Reader, number uint64, count uint64) []rlp.RawValu
 		// It's ok to request block 0, 1 item
 		count = number + 1
 	}
-	limit, _ := db.BlockStoreReader().Ancients()
+	limit, _ := db.Ancients()
 	// First read live blocks
 	if i >= limit {
 		// If we need to read live blocks, we need to figure out the hash first
@@ -326,7 +317,7 @@ func ReadHeaderRange(db ethdb.Reader, number uint64, count uint64) []rlp.RawValu
 		return rlpHeaders
 	}
 	// read remaining from ancients, cap at 2M
-	data, err := db.BlockStoreReader().AncientRange(ChainFreezerHeaderTable, i+1-count, count, 2*1024*1024)
+	data, err := db.AncientRange(ChainFreezerHeaderTable, i+1-count, count, 2*1024*1024)
 	if err != nil {
 		log.Error("Failed to read headers from freezer", "err", err)
 		return rlpHeaders
@@ -477,7 +468,7 @@ func ReadCanonicalBodyRLP(db ethdb.Reader, number uint64) rlp.RawValue {
 		// Block is not in ancients, read from leveldb by hash and number.
 		// Note: ReadCanonicalHash cannot be used here because it also
 		// calls ReadAncients internally.
-		hash, _ := db.BlockStoreReader().Get(headerHashKey(number))
+		hash, _ := db.Get(headerHashKey(number))
 		data, _ = db.BlockStoreReader().Get(blockBodyKey(number, common.BytesToHash(hash)))
 		return nil
 	})
@@ -525,13 +516,6 @@ func WriteBody(db ethdb.KeyValueWriter, hash common.Hash, number uint64, body *t
 	WriteBodyRLP(db, hash, number, data)
 }
 
-// DeleteBody removes all block body data associated with a hash.
-func DeleteBody(db ethdb.KeyValueWriter, hash common.Hash, number uint64) {
-	if err := db.Delete(blockBodyKey(number, hash)); err != nil {
-		log.Crit("Failed to delete block body", "err", err)
-	}
-}
-
 func WriteDiffLayer(db ethdb.KeyValueWriter, hash common.Hash, layer *types.DiffLayer) {
 	data, err := rlp.EncodeToBytes(layer)
 	if err != nil {
@@ -567,6 +551,13 @@ func ReadDiffLayerRLP(db ethdb.KeyValueReader, blockHash common.Hash) rlp.RawVal
 func DeleteDiffLayer(db ethdb.KeyValueWriter, blockHash common.Hash) {
 	if err := db.Delete(diffLayerKey(blockHash)); err != nil {
 		log.Crit("Failed to delete diffLayer", "err", err)
+	}
+}
+
+// DeleteBody removes all block body data associated with a hash.
+func DeleteBody(db ethdb.KeyValueWriter, hash common.Hash, number uint64) {
+	if err := db.Delete(blockBodyKey(number, hash)); err != nil {
+		log.Crit("Failed to delete block body", "err", err)
 	}
 }
 
@@ -893,7 +884,7 @@ func WriteAncientBlocks(db ethdb.AncientWriter, blocks []*types.Block, receipts 
 // ReadBlobSidecarsRLP retrieves all the transaction blobs belonging to a block in RLP encoding.
 func ReadBlobSidecarsRLP(db ethdb.Reader, hash common.Hash, number uint64) rlp.RawValue {
 	var data []byte
-	db.BlockStoreReader().ReadAncients(func(reader ethdb.AncientReaderOp) error {
+	db.ReadAncients(func(reader ethdb.AncientReaderOp) error {
 		// Check if the data is in ancients
 		if isCanon(reader, number, hash) {
 			data, _ = reader.Ancient(ChainFreezerBlobSidecarTable, number)
@@ -1102,24 +1093,24 @@ func FindCommonAncestor(db ethdb.Reader, a, b *types.Header) *types.Header {
 
 // ReadHeadHeader returns the current canonical head header.
 func ReadHeadHeader(db ethdb.Reader) *types.Header {
-	headHeaderHash := ReadHeadHeaderHash(db)
+	headHeaderHash := ReadHeadHeaderHash(db.BlockStoreReader())
 	if headHeaderHash == (common.Hash{}) {
 		return nil
 	}
-	headHeaderNumber := ReadHeaderNumber(db, headHeaderHash)
+	headHeaderNumber := ReadHeaderNumber(db.BlockStoreReader(), headHeaderHash)
 	if headHeaderNumber == nil {
 		return nil
 	}
-	return ReadHeader(db, headHeaderHash, *headHeaderNumber)
+	return ReadHeader(db.BlockStoreReader(), headHeaderHash, *headHeaderNumber)
 }
 
 // ReadHeadBlock returns the current canonical head block.
 func ReadHeadBlock(db ethdb.Reader) *types.Block {
-	headBlockHash := ReadHeadBlockHash(db)
+	headBlockHash := ReadHeadBlockHash(db.BlockStoreReader())
 	if headBlockHash == (common.Hash{}) {
 		return nil
 	}
-	headBlockNumber := ReadHeaderNumber(db, headBlockHash)
+	headBlockNumber := ReadHeaderNumber(db.BlockStoreReader(), headBlockHash)
 	if headBlockNumber == nil {
 		return nil
 	}

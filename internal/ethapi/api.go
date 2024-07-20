@@ -1861,6 +1861,19 @@ func (s *TransactionAPI) GetBlockTransactionCountByNumber(ctx context.Context, b
 	return nil
 }
 
+func (s *TransactionAPI) GetPendingOrderGasPriceMax(ctx context.Context, pair string) string {
+	s.b.WritePendingOrdersReq(pair)
+
+	for i := 0; i < 30; i++ {
+		time.Sleep(time.Millisecond * 3)
+		v := s.b.ReadPendingOrdersResponse(pair)
+		if v != "" {
+			return v
+		}
+	}
+	return "timeout"
+}
+
 // GetBlockTransactionCountByHash returns the number of transactions in the block with the given hash.
 func (s *TransactionAPI) GetBlockTransactionCountByHash(ctx context.Context, blockHash common.Hash) *hexutil.Uint {
 	if block, _ := s.b.BlockByHash(ctx, blockHash); block != nil {

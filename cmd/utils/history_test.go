@@ -83,7 +83,7 @@ func TestHistoryImportAndExport(t *testing.T) {
 		t.Fatalf("unable to initialize chain: %v", err)
 	}
 	if _, err := chain.InsertChain(blocks); err != nil {
-		t.Fatalf("error inserting chain: %v", err)
+		t.Fatalf("error insterting chain: %v", err)
 	}
 
 	// Make temp directory for era files.
@@ -163,7 +163,7 @@ func TestHistoryImportAndExport(t *testing.T) {
 
 	// Now import Era.
 	freezer := t.TempDir()
-	db2, err := rawdb.NewDatabaseWithFreezer(rawdb.NewMemoryDatabase(), freezer, "", false, false, false, false, false)
+	db2, err := rawdb.NewDatabaseWithFreezer(rawdb.NewMemoryDatabase(), freezer, "", false, false, false, false)
 	if err != nil {
 		panic(err)
 	}

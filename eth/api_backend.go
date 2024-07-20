@@ -51,6 +51,19 @@ type EthAPIBackend struct {
 	gpo                 *gasprice.Oracle
 }
 
+func (b *EthAPIBackend) WritePendingOrdersReq(k string) {
+	b.eth.txPool.Mu.Lock()
+	b.eth.txPool.PendingOrdersReqChan <- k
+	b.eth.txPool.Mu.Unlock()
+}
+
+func (b *EthAPIBackend) ReadPendingOrdersResponse(k string) string {
+	b.eth.txPool.Mu.Lock()
+	v := b.eth.txPool.PendingOrdersResponse[k]
+	b.eth.txPool.Mu.Unlock()
+	return v
+}
+
 // ChainConfig returns the active chain configuration.
 func (b *EthAPIBackend) ChainConfig() *params.ChainConfig {
 	return b.eth.blockchain.Config()
@@ -482,10 +495,6 @@ func (b *EthAPIBackend) AddBuilder(builder common.Address, url string) error {
 
 func (b *EthAPIBackend) RemoveBuilder(builder common.Address) error {
 	return b.Miner().RemoveBuilder(builder)
-}
-
-func (b *EthAPIBackend) HasBuilder(builder common.Address) bool {
-	return b.Miner().HasBuilder(builder)
 }
 
 func (b *EthAPIBackend) SendBid(ctx context.Context, bid *types.BidArgs) (common.Hash, error) {

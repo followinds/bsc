@@ -112,14 +112,7 @@ func testChainSyncWithBlobs(t *testing.T, mode downloader.SyncMode, preCancunBlk
 	cancunTime := (preCancunBlks + 1) * 10
 	config.CancunTime = &cancunTime
 
-	// Create an empty handler
-	empty := newTestParliaHandlerAfterCancun(t, &config, mode, 0, 0)
-	defer empty.close()
-	if downloader.SnapSync == mode && !empty.handler.snapSync.Load() {
-		t.Fatalf("snap sync disabled on pristine blockchain")
-	}
-
-	// Create a full handler
+	// Create a full handler and ensure snap sync ends up disabled
 	full := newTestParliaHandlerAfterCancun(t, &config, mode, preCancunBlks, postCancunBlks)
 	defer full.close()
 	if downloader.SnapSync == mode && full.handler.snapSync.Load() {
@@ -128,6 +121,13 @@ func testChainSyncWithBlobs(t *testing.T, mode downloader.SyncMode, preCancunBlk
 
 	// check blocks and blobs
 	checkChainWithBlobs(t, full.chain, preCancunBlks, postCancunBlks)
+
+	// Create an empty handler and ensure it's in snap sync mode
+	empty := newTestParliaHandlerAfterCancun(t, &config, mode, 0, 0)
+	defer empty.close()
+	if downloader.SnapSync == mode && !empty.handler.snapSync.Load() {
+		t.Fatalf("snap sync disabled on pristine blockchain")
+	}
 
 	// Sync up the two handlers via both `eth` and `snap`
 	ethVer := uint(eth.ETH68)
@@ -165,17 +165,14 @@ func testChainSyncWithBlobs(t *testing.T, mode downloader.SyncMode, preCancunBlk
 	go full.handler.runSnapExtension(fullPeerSnap, func(peer *snap.Peer) error {
 		return snap.Handle((*snapHandler)(full.handler), peer)
 	})
+	// Wait a bit for the above handlers to start
+	time.Sleep(250 * time.Millisecond)
 
-	for empty.handler.peers.snapLen() < 1 {
-		// Wait a bit for the above handlers to start
-		time.Sleep(100 * time.Millisecond)
-	}
-
+	// Check that snap sync was disabled
 	op := peerToSyncOp(mode, empty.handler.peers.peerWithHighestTD())
 	if err := empty.handler.doSync(op); err != nil {
 		t.Fatal("sync failed:", err)
 	}
-	// Check that snap sync was disabled
 	if !empty.handler.synced.Load() {
 		t.Fatalf("full sync not done after successful synchronisation")
 	}

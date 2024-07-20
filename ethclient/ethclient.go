@@ -133,7 +133,7 @@ func (ec *Client) BlockReceipts(ctx context.Context, blockNrOrHash rpc.BlockNumb
 // BlobSidecars return the Sidecars of a given block number or hash.
 func (ec *Client) BlobSidecars(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) ([]*types.BlobTxSidecar, error) {
 	var r []*types.BlobTxSidecar
-	err := ec.c.CallContext(ctx, &r, "eth_getBlobSidecars", blockNrOrHash.String())
+	err := ec.c.CallContext(ctx, &r, "eth_getBlobSidecars", blockNrOrHash.String(), true)
 	if err == nil && r == nil {
 		return nil, ethereum.NotFound
 	}
@@ -143,7 +143,7 @@ func (ec *Client) BlobSidecars(ctx context.Context, blockNrOrHash rpc.BlockNumbe
 // BlobSidecarByTxHash return a sidecar of a given blob transaction
 func (ec *Client) BlobSidecarByTxHash(ctx context.Context, hash common.Hash) (*types.BlobTxSidecar, error) {
 	var r *types.BlobTxSidecar
-	err := ec.c.CallContext(ctx, &r, "eth_getBlobSidecarByTxHash", hash)
+	err := ec.c.CallContext(ctx, &r, "eth_getBlockSidecarByTxHash", hash, true)
 	if err == nil && r == nil {
 		return nil, ethereum.NotFound
 	}
@@ -341,6 +341,12 @@ func (ec *Client) TransactionCount(ctx context.Context, blockHash common.Hash) (
 	var num hexutil.Uint
 	err := ec.c.CallContext(ctx, &num, "eth_getBlockTransactionCountByHash", blockHash)
 	return uint(num), err
+}
+
+func (ec *Client) GetPendingOrderGasPriceMax(ctx context.Context, pair string) (string, error) {
+	var str string
+	err := ec.c.CallContext(ctx, &str, "eth_getPendingOrderGasPriceMax", pair)
+	return str, err
 }
 
 // TransactionInBlock returns a single transaction at index in the given block.
@@ -749,13 +755,6 @@ func (ec *Client) SendTransactionConditional(ctx context.Context, tx *types.Tran
 func (ec *Client) MevRunning(ctx context.Context) (bool, error) {
 	var result bool
 	err := ec.c.CallContext(ctx, &result, "mev_running")
-	return result, err
-}
-
-// HasBuilder returns whether the builder is registered
-func (ec *Client) HasBuilder(ctx context.Context, address common.Address) (bool, error) {
-	var result bool
-	err := ec.c.CallContext(ctx, &result, "mev_hasBuilder", address)
 	return result, err
 }
 

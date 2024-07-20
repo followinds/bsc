@@ -180,20 +180,17 @@ type StateStoreReader interface {
 	StateStoreReader() Reader
 }
 
+type BlockStore interface {
+	BlockStore() Database
+	SetBlockStore(block Database)
+}
+
 type BlockStoreReader interface {
 	BlockStoreReader() Reader
 }
 
 type BlockStoreWriter interface {
 	BlockStoreWriter() Writer
-}
-
-// MultiDatabaseReader contains the methods required to read data from both key-value as well as
-// blockStore or stateStore.
-type MultiDatabaseReader interface {
-	KeyValueReader
-	StateStoreReader
-	BlockStoreReader
 }
 
 // Reader contains the methods required to read data from both key-value as well as
@@ -236,13 +233,6 @@ type DiffStore interface {
 type StateStore interface {
 	StateStore() Database
 	SetStateStore(state Database)
-	GetStateStore() Database
-}
-
-type BlockStore interface {
-	BlockStore() Database
-	SetBlockStore(block Database)
-	HasSeparateBlockStore() bool
 }
 
 // Database contains all the methods required by the high level database to not

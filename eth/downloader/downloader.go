@@ -209,9 +209,6 @@ type BlockChain interface {
 
 	// UpdateChasingHead update remote best chain head, used by DA check now.
 	UpdateChasingHead(head *types.Header)
-
-	// AncientTail retrieves the tail the ancients blocks
-	AncientTail() (uint64, error)
 }
 
 type DownloadOption func(downloader *Downloader) *Downloader
@@ -558,8 +555,8 @@ func (d *Downloader) syncWithPeer(p *peerConnection, hash common.Hash, td, ttd *
 		} else {
 			d.ancientLimit = 0
 		}
-		frozen, _ := d.stateDB.BlockStore().Ancients() // Ignore the error here since light client can also hit here.
-		itemAmountInAncient, _ := d.stateDB.BlockStore().ItemAmountInAncient()
+		frozen, _ := d.stateDB.Ancients() // Ignore the error here since light client can also hit here.
+		itemAmountInAncient, _ := d.stateDB.ItemAmountInAncient()
 		// If a part of blockchain data has already been written into active store,
 		// disable the ancient style insertion explicitly.
 		if origin >= frozen && itemAmountInAncient != 0 {
@@ -800,11 +797,6 @@ func (d *Downloader) findAncestor(p *peerConnection, localHeight uint64, remoteH
 		// We're above the max reorg threshold, find the earliest fork point
 		floor = int64(localHeight - maxForkAncestry)
 	}
-	// if we have pruned too much history, reset the floor
-	if tail, err := d.blockchain.AncientTail(); err == nil && tail > uint64(floor) {
-		floor = int64(tail)
-	}
-
 	// If we're doing a light sync, ensure the floor doesn't go below the CHT, as
 	// all headers before that point will be missing.
 	if mode == LightSync {
@@ -1671,9 +1663,9 @@ func (d *Downloader) reportSnapSyncProgress(force bool) {
 	}
 	// Don't report anything until we have a meaningful progress
 	var (
-		headerBytes, _  = d.stateDB.BlockStore().AncientSize(rawdb.ChainFreezerHeaderTable)
-		bodyBytes, _    = d.stateDB.BlockStore().AncientSize(rawdb.ChainFreezerBodiesTable)
-		receiptBytes, _ = d.stateDB.BlockStore().AncientSize(rawdb.ChainFreezerReceiptTable)
+		headerBytes, _  = d.stateDB.AncientSize(rawdb.ChainFreezerHeaderTable)
+		bodyBytes, _    = d.stateDB.AncientSize(rawdb.ChainFreezerBodiesTable)
+		receiptBytes, _ = d.stateDB.AncientSize(rawdb.ChainFreezerReceiptTable)
 	)
 	syncedBytes := common.StorageSize(headerBytes + bodyBytes + receiptBytes)
 	if syncedBytes == 0 {

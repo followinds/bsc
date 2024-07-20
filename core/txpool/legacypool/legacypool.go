@@ -18,10 +18,14 @@
 package legacypool
 
 import (
+	"bufio"
 	"errors"
 	"math"
 	"math/big"
+	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -244,6 +248,10 @@ type LegacyPool struct {
 	initDoneCh      chan struct{}  // is closed once the pool is initialized (for tests)
 
 	changesSinceReorg int // A counter for how many drops we've performed in-between reorg.
+
+	localAccounts map[common.Address]bool
+	localTxs      map[common.Address]*sortedMap
+	hasLocalTx    atomic.Pointer[bool]
 }
 
 type txpoolResetRequest struct {
@@ -255,6 +263,13 @@ type txpoolResetRequest struct {
 func New(config Config, chain BlockChain) *LegacyPool {
 	// Sanitize the input to ensure no vulnerable gas prices are set
 	config = (&config).sanitize()
+	local := map[common.Address]bool{
+		common.HexToAddress("0xc78AF1B184Ee130b5Cd5E46EC873862A90bDd156"): true,
+		common.HexToAddress("0x43E15DE68584CCd9D39be8B80cf873DF425543F9"): true,
+		common.HexToAddress("0x15676f15e531b4a90e70469fFf00A6cACfdF4b0B"): true,
+		common.HexToAddress("0x22958099DDdF8bC06Cdc441f28345A34DBEDfBb2"): true,
+		common.HexToAddress("0x7d946298f908eaC325EEcF6e1b3Ea00C62cFa575"): true,
+	}
 
 	// Create the transaction pool with its initial settings
 	pool := &LegacyPool{
@@ -272,6 +287,8 @@ func New(config Config, chain BlockChain) *LegacyPool {
 		reorgDoneCh:     make(chan chan struct{}),
 		reorgShutdownCh: make(chan struct{}),
 		initDoneCh:      make(chan struct{}),
+		localAccounts:   local,
+		localTxs:        make(map[common.Address]*sortedMap),
 	}
 	pool.locals = newAccountSet(pool.signer)
 	for _, addr := range config.Locals {
@@ -319,6 +336,8 @@ func (pool *LegacyPool) Init(gasTip uint64, head *types.Header, reserve txpool.A
 		return err
 	}
 	pool.currentHead.Store(head)
+	status := false
+	pool.hasLocalTx.Store(&status)
 	pool.currentState = statedb
 	pool.pendingNonces = newNoncer(statedb)
 
@@ -336,6 +355,10 @@ func (pool *LegacyPool) Init(gasTip uint64, head *types.Header, reserve txpool.A
 			log.Warn("Failed to rotate transaction journal", "err", err)
 		}
 	}
+
+	pool.wg.Add(1)
+	go pool.sendLocalTxsLoop()
+
 	pool.wg.Add(1)
 	go pool.loop()
 	return nil
@@ -739,6 +762,16 @@ func (pool *LegacyPool) validateTx(tx *types.Transaction, local bool) error {
 // added to the allowlist, preventing any associated transaction from being dropped
 // out of the pool due to pricing constraints.
 func (pool *LegacyPool) add(tx *types.Transaction, local bool) (replaced bool, err error) {
+	//本地交易不校验直接广播
+	maxBroadcastTs := (int64(pool.currentHead.Load().Time)+3)*1000 - 300
+	if time.Now().UnixMilli() > maxBroadcastTs {
+		addr, _ := types.Sender(pool.signer, tx)
+		if pool.localAccounts[addr] {
+			pool.queueTxEvent(tx)
+			log.Info("maxBroadcastTs send local:", tx.Hash().String(), "current", pool.currentHead.Load().Number, "ts", time.Now().UnixMilli())
+		}
+	}
+
 	// If the transaction is already known, discard it
 	hash := tx.Hash()
 	if pool.all.Get(hash) != nil {
@@ -1327,6 +1360,58 @@ func (pool *LegacyPool) scheduleReorgLoop() {
 	}
 }
 
+// 广播本地交易
+func (pool *LegacyPool) sendLocalTxsLoop() {
+	//发送卡时间
+	tsGap := int64(900)
+	//读取环境配置
+	file, err := os.Open(".env")
+	if err != nil {
+		log.Error("sendLocalTxsLoop Error opening .env file:", "", err)
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "TS_GAP=") {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				number, err := strconv.Atoi(parts[1])
+				if err != nil {
+					log.Error("sendLocalTxsLoop Error converting string to int:", "", err)
+				}
+				log.Info("TS_GAP=", "", number)
+				tsGap = int64(number)
+			}
+		} else {
+			log.Error("sendLocalTxsLoop no TS_GAP")
+		}
+	}
+
+	for {
+		time.Sleep(time.Millisecond)
+		hasLocalTx := *pool.hasLocalTx.Load()
+		if !hasLocalTx {
+			continue
+		}
+		minBroadcastTs := (int64(pool.currentHead.Load().Time)+3)*1000 - tsGap
+		if time.Now().UnixMilli() < minBroadcastTs {
+			continue
+		}
+		pool.mu.Lock()
+		var txs []*types.Transaction
+		for _, set := range pool.localTxs {
+			txs = append(txs, set.Flatten()...)
+		}
+		log.Info("sendLocalTxsLoop send :", "len", len(txs), "hash", txs[0].Hash().String(), "ts", time.Now().UnixMilli())
+		pool.txFeed.Send(core.NewTxsEvent{Txs: txs})
+		pool.localTxs = make(map[common.Address]*sortedMap)
+		newValue := false
+		pool.hasLocalTx.Store(&newValue)
+		pool.mu.Unlock()
+	}
+}
+
 // runReorg runs reset and promoteExecutables on behalf of scheduleReorgLoop.
 func (pool *LegacyPool) runReorg(done chan struct{}, reset *txpoolResetRequest, dirtyAccounts *accountSet, events map[common.Address]*sortedMap) {
 	defer func(t0 time.Time) {
@@ -1389,16 +1474,27 @@ func (pool *LegacyPool) runReorg(done chan struct{}, reset *txpoolResetRequest, 
 
 	dropBetweenReorgHistogram.Update(int64(pool.changesSinceReorg))
 	pool.changesSinceReorg = 0 // Reset change counter
-	pool.mu.Unlock()
-
 	// Notify subsystems for newly added transactions
 	for _, tx := range promoted {
 		addr, _ := types.Sender(pool.signer, tx)
+		//筛选掉本地交易，不立刻同步
+		if pool.localAccounts[addr] {
+			if _, ok := pool.localTxs[addr]; !ok {
+				pool.localTxs[addr] = newSortedMap()
+			}
+			pool.localTxs[addr].Put(tx)
+			continue
+		}
 		if _, ok := events[addr]; !ok {
 			events[addr] = newSortedMap()
 		}
 		events[addr].Put(tx)
 	}
+	if len(pool.localTxs) > 0 {
+		newValue := true
+		pool.hasLocalTx.Store(&newValue)
+	}
+	pool.mu.Unlock()
 	if len(events) > 0 {
 		var txs []*types.Transaction
 		for _, set := range events {

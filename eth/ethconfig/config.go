@@ -51,14 +51,14 @@ var FullNodeGPO = gasprice.Config{
 var Defaults = Config{
 	SyncMode:           downloader.SnapSync,
 	NetworkId:          0, // enable auto configuration of networkID == chainID
-	TxLookupLimit:      2350000,
-	TransactionHistory: 2350000,
+	TxLookupLimit:      10000,
+	TransactionHistory: 10000,
 	StateHistory:       params.FullImmutabilityThreshold,
 	LightPeers:         100,
 	DatabaseCache:      512,
 	TrieCleanCache:     154,
 	TrieDirtyCache:     256,
-	TrieTimeout:        60 * time.Minute,
+	TrieTimeout:        5 * time.Minute,
 	TriesInMemory:      128,
 	TriesVerifyMode:    core.LocalVerify,
 	SnapshotCache:      102,
@@ -188,8 +188,11 @@ type Config struct {
 	// send-transaction variants. The unit is ether.
 	RPCTxFeeCap float64
 
-	// OverrideBohr (TODO: remove after the fork)
-	OverrideBohr *uint64 `toml:",omitempty"`
+	// OverrideCancun (TODO: remove after the fork)
+	OverrideCancun *uint64 `toml:",omitempty"`
+
+	// OverrideHaber (TODO: remove after the fork)
+	OverrideHaber *uint64 `toml:",omitempty"`
 
 	// OverrideVerkle (TODO: remove after the fork)
 	OverrideVerkle *uint64 `toml:",omitempty"`

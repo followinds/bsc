@@ -307,10 +307,6 @@ func New(
 	return c
 }
 
-func (p *Parlia) Period() uint64 {
-	return p.config.Period
-}
-
 func (p *Parlia) IsSystemTransaction(tx *types.Transaction, header *types.Header) (bool, error) {
 	// deploy a contract
 	if tx.To() == nil {

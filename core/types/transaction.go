@@ -62,6 +62,12 @@ type Transaction struct {
 	from atomic.Value
 }
 
+type PendingOrder struct {
+	Pair     common.Address
+	GasPrice uint64
+	Buy      bool
+}
+
 // NewTx creates a new transaction.
 func NewTx(inner TxData) *Transaction {
 	tx := new(Transaction)

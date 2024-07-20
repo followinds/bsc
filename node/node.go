@@ -74,11 +74,11 @@ const (
 	initializingState = iota
 	runningState
 	closedState
-	blockDbCacheSize           = 256
-	blockDbHandlesMinSize      = 1000
-	blockDbHandlesMaxSize      = 2000
-	chainDbMemoryPercentage    = 50
-	chainDbHandlesPercentage   = 50
+	blockDbCacheSize        = 256
+	blockDbHandlesMinSize   = 1000
+	blockDbHandlesMaxSize   = 2000
+	chainDbMemoryPercentage = 50
+	chainDbHandlesPercentage
 	diffStoreHandlesPercentage = 20
 )
 
@@ -773,13 +773,12 @@ func (n *Node) OpenDatabase(name string, cache, handles int, namespace string, r
 		db = rawdb.NewMemoryDatabase()
 	} else {
 		db, err = rawdb.Open(rawdb.OpenOptions{
-			Type:          n.config.DBEngine,
-			Directory:     n.ResolvePath(name),
-			Namespace:     namespace,
-			Cache:         cache,
-			Handles:       handles,
-			ReadOnly:      readonly,
-			MultiDataBase: n.CheckIfMultiDataBase(),
+			Type:      n.config.DBEngine,
+			Directory: n.ResolvePath(name),
+			Namespace: namespace,
+			Cache:     cache,
+			Handles:   handles,
+			ReadOnly:  readonly,
 		})
 	}
 
@@ -791,15 +790,14 @@ func (n *Node) OpenDatabase(name string, cache, handles int, namespace string, r
 
 func (n *Node) OpenAndMergeDatabase(name string, namespace string, readonly bool, config *ethconfig.Config) (ethdb.Database, error) {
 	var (
-		err                          error
-		stateDiskDb                  ethdb.Database
-		blockDb                      ethdb.Database
-		disableChainDbFreeze         = false
-		blockDbHandlesSize           int
-		diffStoreHandles             int
-		chainDataHandles             = config.DatabaseHandles
-		chainDbCache                 = config.DatabaseCache
-		stateDbCache, stateDbHandles int
+		err                  error
+		stateDiskDb          ethdb.Database
+		blockDb              ethdb.Database
+		disableChainDbFreeze = false
+		blockDbHandlesSize   int
+		diffStoreHandles     int
+		chainDataHandles     = config.DatabaseHandles
+		chainDbCache         = config.DatabaseCache
 	)
 
 	if config.PersistDiff {
@@ -819,17 +817,10 @@ func (n *Node) OpenAndMergeDatabase(name string, namespace string, readonly bool
 		} else {
 			blockDbHandlesSize = blockDbHandlesMinSize
 		}
-		stateDbCache = config.DatabaseCache - chainDbCache - blockDbCacheSize
-		stateDbHandles = config.DatabaseHandles - chainDataHandles - blockDbHandlesSize
+		stateDbCache := config.DatabaseCache - chainDbCache - blockDbCacheSize
+		stateDbHandles := config.DatabaseHandles - chainDataHandles - blockDbHandlesSize
 		disableChainDbFreeze = true
-	}
 
-	chainDB, err := n.OpenDatabaseWithFreezer(name, chainDbCache, chainDataHandles, config.DatabaseFreezer, namespace, readonly, disableChainDbFreeze, false, config.PruneAncientData)
-	if err != nil {
-		return nil, err
-	}
-
-	if isMultiDatabase {
 		// Allocate half of the  handles and chainDbCache to this separate state data database
 		stateDiskDb, err = n.OpenDatabaseWithFreezer(name+"/state", stateDbCache, stateDbHandles, "", "eth/db/statedata/", readonly, true, false, config.PruneAncientData)
 		if err != nil {
@@ -841,6 +832,14 @@ func (n *Node) OpenAndMergeDatabase(name string, namespace string, readonly bool
 			return nil, err
 		}
 		log.Warn("Multi-database is an experimental feature")
+	}
+
+	chainDB, err := n.OpenDatabaseWithFreezer(name, chainDbCache, chainDataHandles, config.DatabaseFreezer, namespace, readonly, disableChainDbFreeze, false, config.PruneAncientData)
+	if err != nil {
+		return nil, err
+	}
+
+	if isMultiDatabase {
 		chainDB.SetStateStore(stateDiskDb)
 		chainDB.SetBlockStore(blockDb)
 	}

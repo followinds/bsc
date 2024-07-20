@@ -239,7 +239,7 @@ func (f *Freezer) Ancient(kind string, number uint64) ([]byte, error) {
 //   - if maxBytes is not specified, 'count' items will be returned if they are present.
 func (f *Freezer) AncientRange(kind string, start, count, maxBytes uint64) ([][]byte, error) {
 	if table := f.tables[kind]; table != nil {
-		return table.RetrieveItems(start-f.offset, count, maxBytes)
+		return table.RetrieveItems(start, count, maxBytes)
 	}
 	return nil, errUnknownTable
 }
@@ -252,7 +252,7 @@ func (f *Freezer) Ancients() (uint64, error) {
 func (f *Freezer) TableAncients(kind string) (uint64, error) {
 	f.writeLock.RLock()
 	defer f.writeLock.RUnlock()
-	return f.tables[kind].items.Load() + f.offset, nil
+	return f.tables[kind].items.Load(), nil
 }
 
 // ItemAmountInAncient returns the actual length of current ancientDB.
@@ -540,6 +540,41 @@ func gcKvStore(db ethdb.KeyValueStore, ancients []common.Hash, first uint64, fro
 		log.Crit("Failed to delete frozen side blocks", "err", err)
 	}
 	batch.Reset()
+
+	// Step into the future and delete and dangling side chains
+	if frozen > 0 {
+		tip := frozen
+		nfdb := &nofreezedb{KeyValueStore: db}
+		for len(dangling) > 0 {
+			drop := make(map[common.Hash]struct{})
+			for _, hash := range dangling {
+				log.Debug("Dangling parent from freezer", "number", tip-1, "hash", hash)
+				drop[hash] = struct{}{}
+			}
+			children := ReadAllHashes(db, tip)
+			for i := 0; i < len(children); i++ {
+				// Dig up the child and ensure it's dangling
+				child := ReadHeader(nfdb, children[i], tip)
+				if child == nil {
+					log.Error("Missing dangling header", "number", tip, "hash", children[i])
+					continue
+				}
+				if _, ok := drop[child.ParentHash]; !ok {
+					children = append(children[:i], children[i+1:]...)
+					i--
+					continue
+				}
+				// Delete all block data associated with the child
+				log.Debug("Deleting dangling block", "number", tip, "hash", children[i], "parent", child.ParentHash)
+				DeleteBlock(batch, children[i], tip)
+			}
+			dangling = children
+			tip++
+		}
+		if err := batch.Write(); err != nil {
+			log.Crit("Failed to delete dangling side blocks", "err", err)
+		}
+	}
 
 	// Log something friendly for the user
 	context := []interface{}{
