@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -295,11 +296,12 @@ func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus
 	}
 	worker.newpayloadTimeout = newpayloadTimeout
 
-	worker.wg.Add(4)
+	worker.wg.Add(5)
 	go worker.mainLoop()
 	go worker.newWorkLoop(recommit)
 	go worker.resultLoop()
 	go worker.taskLoop()
+	go worker.simulateLoop()
 
 	// Submit first work to initialize pending state.
 	if init {
@@ -307,6 +309,196 @@ func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus
 	}
 
 	return worker
+}
+
+// 该协程主要用于接收rpc发来的请求消息，若有消息，则取出txpool当中的pending交易
+// 模拟矿工打包把所有交易模拟一遍，然后把得到的最高gasprice返回
+// 后续可以改成返回所有的相关订单
+func (w *worker) simulateLoop() {
+	log.Info("start simulateLoop")
+	for {
+		var reqs []string
+		time.Sleep(time.Millisecond)
+		if w.syncing.Load() {
+			continue
+		}
+
+	readLoop:
+		for {
+			select {
+			case v := <-w.eth.TxPool().PendingOrdersReqChan:
+				reqs = append(reqs, v)
+			default:
+				break readLoop
+			}
+		}
+		if len(reqs) == 0 {
+			continue
+		}
+		var pairs []common.Address
+		for _, req := range reqs {
+			pairs = append(pairs, common.HexToAddress(req))
+		}
+		// 打印日志
+		log.Info("simulateLoop reqs:", "reqs:", reqs, "currentBlock", w.chain.CurrentBlock().Number)
+		result := w.commitWorkForSimulate(int64(w.chain.CurrentBlock().Time+3), pairs)
+		w.eth.TxPool().Mu.Lock()
+
+		//暂时先用map来保存结果，后续有需要再优化
+		for i, _ := range reqs {
+			w.eth.TxPool().PendingOrdersResponse[reqs[i]] = strconv.FormatUint(result[i], 10)
+		}
+		w.eth.TxPool().Mu.Unlock()
+	}
+}
+
+// inTurn return true if the current worker is in turn.
+func (w *worker) nextValidator() common.Address {
+	validator, _ := w.engine.NextInTurnValidator(w.chain, w.chain.CurrentBlock())
+	return validator
+}
+
+func (w *worker) commitWorkForSimulate(timestamp int64, pairs []common.Address) []uint64 {
+	// Set the coinbase if the worker is running or it's required
+	var coinbase common.Address
+	coinbase = w.nextValidator()
+	stopTimer := time.NewTimer(0)
+	defer stopTimer.Stop()
+	<-stopTimer.C // discard the initial tick
+
+	stopWaitTimer := time.NewTimer(0)
+	defer stopWaitTimer.Stop()
+	<-stopWaitTimer.C // discard the initial tick
+
+	// validator can try several times to get the most profitable block,
+	// as long as the timestamp is not reached.
+	workList := make([]*environment, 0, 10)
+	var prevWork *environment
+	// workList clean up
+	defer func() {
+		for _, wk := range workList {
+			// only keep the best work, discard others.
+			if wk == w.current {
+				continue
+			}
+			wk.discard()
+		}
+	}()
+	work, err := w.prepareWork(&generateParams{
+		timestamp: uint64(timestamp),
+		coinbase:  coinbase,
+		prevWork:  prevWork,
+	})
+	if err != nil {
+		return nil
+	}
+	return w.fillTransactionsPendingOrders(nil, work, stopTimer, nil, pairs)
+}
+
+func (w *worker) fillTransactionsPendingOrders(interruptCh chan int32, env *environment, stopTimer *time.Timer, bidTxs mapset.Set[common.Hash], pairs []common.Address) []uint64 {
+	w.mu.RLock()
+	tip := w.tip
+	w.mu.RUnlock()
+
+	// Retrieve the pending transactions pre-filtered by the 1559/4844 dynamic fees
+	filter := txpool.PendingFilter{
+		MinTip: tip,
+	}
+	if env.header.BaseFee != nil {
+		filter.BaseFee = uint256.MustFromBig(env.header.BaseFee)
+	}
+	if env.header.ExcessBlobGas != nil {
+		filter.BlobFee = uint256.MustFromBig(eip4844.CalcBlobFee(*env.header.ExcessBlobGas))
+	}
+	filter.OnlyPlainTxs, filter.OnlyBlobTxs = true, false
+	pendingPlainTxs := w.eth.TxPool().Pending(filter)
+
+	filter.OnlyPlainTxs, filter.OnlyBlobTxs = false, true
+	pendingBlobTxs := w.eth.TxPool().Pending(filter)
+
+	if bidTxs != nil {
+		filterBidTxs := func(commonTxs map[common.Address][]*txpool.LazyTransaction) {
+			for acc, txs := range commonTxs {
+				for i := len(txs) - 1; i >= 0; i-- {
+					if bidTxs.Contains(txs[i].Hash) {
+						if i == len(txs)-1 {
+							delete(commonTxs, acc)
+						} else {
+							commonTxs[acc] = txs[i+1:]
+						}
+						break
+					}
+				}
+			}
+		}
+
+		filterBidTxs(pendingPlainTxs)
+		filterBidTxs(pendingBlobTxs)
+	}
+
+	// Split the pending transactions into locals and remotes.
+	localPlainTxs, remotePlainTxs := make(map[common.Address][]*txpool.LazyTransaction), pendingPlainTxs
+	localBlobTxs, remoteBlobTxs := make(map[common.Address][]*txpool.LazyTransaction), pendingBlobTxs
+
+	for _, account := range w.eth.TxPool().Locals() {
+		if txs := remotePlainTxs[account]; len(txs) > 0 {
+			delete(remotePlainTxs, account)
+			localPlainTxs[account] = txs
+		}
+		if txs := remoteBlobTxs[account]; len(txs) > 0 {
+			delete(remoteBlobTxs, account)
+			localBlobTxs[account] = txs
+		}
+	}
+
+	// Fill the block with all available pending transactions.
+	// we will abort when:
+	//   1.new block was imported
+	//   2.out of Gas, no more transaction can be added.
+	//   3.the mining timer has expired, stop adding transactions.
+	//   4.interrupted resubmit timer, which is by default 10s.
+	//     resubmit is for PoW only, can be deleted for PoS consensus later
+	if len(localPlainTxs) > 0 || len(localBlobTxs) > 0 {
+		plainTxs := newTransactionsByPriceAndNonce(env.signer, localPlainTxs, env.header.BaseFee)
+		blobTxs := newTransactionsByPriceAndNonce(env.signer, localBlobTxs, env.header.BaseFee)
+
+		return w.commitTransactionsPendingOrders(env, plainTxs, blobTxs, pairs)
+	}
+	if len(remotePlainTxs) > 0 || len(remoteBlobTxs) > 0 {
+		plainTxs := newTransactionsByPriceAndNonce(env.signer, remotePlainTxs, env.header.BaseFee)
+		blobTxs := newTransactionsByPriceAndNonce(env.signer, remoteBlobTxs, env.header.BaseFee)
+
+		return w.commitTransactionsPendingOrders(env, plainTxs, blobTxs, pairs)
+	}
+
+	return nil
+}
+
+func (w *worker) commitTransactionsPendingOrders(env *environment, plainTxs, blobTxs *transactionsByPriceAndNonce, pairs []common.Address) []uint64 {
+	gasLimit := env.header.GasLimit
+	if env.gasPool == nil {
+		env.gasPool = new(core.GasPool).AddGas(gasLimit)
+		env.gasPool.SubGas(params.SystemTxsGas)
+	}
+
+	//var coalescedLogs []*types.Log
+	// initialize bloom processors
+	processorCapacity := 100
+	if plainTxs.CurrentSize() < processorCapacity {
+		processorCapacity = plainTxs.CurrentSize()
+	}
+	//bloomProcessors := core.NewAsyncReceiptBloomGenerator(processorCapacity)
+
+	stopPrefetchCh := make(chan struct{})
+	defer close(stopPrefetchCh)
+	// prefetch plainTxs txs, don't bother to prefetch a few blobTxs
+	txsPrefetch := plainTxs.Copy()
+	tx := txsPrefetch.PeekWithUnwrap()
+	if tx != nil {
+		txCurr := &tx
+		return w.prefetcher.PrefetchMiningPendingOrders(txsPrefetch, env.header, env.gasPool.Gas(), env.state.CopyDoPrefetch(), *w.chain.GetVMConfig(), stopPrefetchCh, txCurr, pairs)
+	}
+	return nil
 }
 
 func (w *worker) setBestBidFetcher(fetcher bidFetcher) {

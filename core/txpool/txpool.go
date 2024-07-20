@@ -74,7 +74,10 @@ type TxPool struct {
 	quit chan chan error         // Quit channel to tear down the head updater
 	term chan struct{}           // Termination channel to detect a closed pool
 
-	sync chan chan error // Testing / simulator channel to block until internal reset is done
+	sync                  chan chan error // Testing / simulator channel to block until internal reset is done
+	Mu                    sync.Mutex
+	PendingOrdersResponse map[string]string
+	PendingOrdersReqChan  chan string
 }
 
 // New creates a new transaction pool to gather, sort and filter inbound
@@ -86,11 +89,13 @@ func New(gasTip uint64, chain BlockChain, subpools []SubPool) (*TxPool, error) {
 	head := chain.CurrentBlock()
 
 	pool := &TxPool{
-		subpools:     subpools,
-		reservations: make(map[common.Address]SubPool),
-		quit:         make(chan chan error),
-		term:         make(chan struct{}),
-		sync:         make(chan chan error),
+		subpools:              subpools,
+		reservations:          make(map[common.Address]SubPool),
+		quit:                  make(chan chan error),
+		term:                  make(chan struct{}),
+		sync:                  make(chan chan error),
+		PendingOrdersResponse: make(map[string]string),
+		PendingOrdersReqChan:  make(chan string, 1000),
 	}
 	for i, subpool := range subpools {
 		if err := subpool.Init(gasTip, head, pool.reserver(i, subpool)); err != nil {

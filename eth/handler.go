@@ -377,32 +377,36 @@ func newHandler(config *handlerConfig) (*handler, error) {
 	return h, nil
 }
 
-// force close peer
+const badPeerCheckTime = 300
+
+// 若peer在五分钟内，没有广播过区块，或者成功将tx add进本节点的txpool,则视为不健康节点，则拉黑
+// 如果没有广播区块，则可能是同行的接收数据的假节点，或者正在同步当中的节点
+// 如果没有成功添加tx到txpool，要买这个是假节点，要买节点距离本节点太远，连接无意义
 func (h *handler) closeUselessPeer() {
 	for {
 		time.Sleep(60 * time.Second)
 		if h.synced.Load() {
 			if h.syncedTime == 0 {
 				h.syncedTime = time.Now().Unix()
-				time.Sleep(600 * time.Second)
+				time.Sleep(badPeerCheckTime * time.Second)
 				continue
 			}
 			nowTs := time.Now().Unix()
 			h.blackListMu.Lock()
+			//超过一小时则移除黑名单
 			for k, v := range h.blackList {
-				if nowTs-v > 7200 {
+				if nowTs-v > badPeerCheckTime*12 {
 					h.blackList[k] = 0
 				}
 			}
 
 			h.peers.lock.Lock()
 			log.Info("closeUselessPeer check", "before_len", len(h.peers.peers))
-			limit := int64(600)
 			closed := 0
+			//若节点在黑名单里面或者节点已经五分钟没有同步过数据，则主动断开
 			for _, p := range h.peers.peers {
-				blackTs := h.blackList[p.Peer.ID()]
-				isBlack := nowTs-blackTs < 3600
-				if (nowTs-p.LastMsgTime > limit || isBlack) && p != nil {
+				isBlack := h.blackList[p.Peer.ID()] > 0
+				if (nowTs-p.LastMsgTime > badPeerCheckTime || isBlack) && p != nil {
 					p.Peer.Disconnect(p2p.DiscUselessPeer)
 					if !isBlack {
 						h.blackList[p.Peer.ID()] = nowTs
@@ -411,13 +415,7 @@ func (h *handler) closeUselessPeer() {
 				}
 			}
 			h.blackListMu.Unlock()
-			log.Info("closeUselessPeer because of no data receive", "closed", closed)
-			h.peers.lock.Unlock()
-			time.Sleep(time.Second * 6)
-
-			h.peers.lock.Lock()
-			log.Info("closeUselessPeer check", "remain:", len(h.peers.peers))
-			h.peers.lock.Unlock()
+			log.Info("closeUselessPeer because of no data receive", "closed=", closed)
 		}
 	}
 }

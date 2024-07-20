@@ -20,9 +20,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/ethereum/go-ethereum/eth/protocols/eth"
 	"math"
 	mrand "math/rand"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -194,15 +196,102 @@ type TxFetcher struct {
 	fetchTxs func(string, []common.Hash) error          // Retrieves a set of txs from a remote peer
 	dropPeer func(string)                               // Drops a peer in case of announcement violation
 
-	step  chan struct{} // Notification channel when the fetcher loop iterates
-	clock mclock.Clock  // Time wrapper to simulate in tests
-	rand  *mrand.Rand   // Randomizer to use in tests instead of map range loops (soft-random)
+	step       chan struct{} // Notification channel when the fetcher loop iterates
+	clock      mclock.Clock  // Time wrapper to simulate in tests
+	rand       *mrand.Rand   // Randomizer to use in tests instead of map range loops (soft-random)
+	totalAddTx atomic.Pointer[uint64]
 }
 
 // NewTxFetcher creates a transaction fetcher to retrieve transaction
 // based on hash announcements.
 func NewTxFetcher(hasTx func(common.Hash) bool, addTxs func(string, []*types.Transaction) []error, fetchTxs func(string, []common.Hash) error, dropPeer func(string)) *TxFetcher {
-	return NewTxFetcherForTests(hasTx, addTxs, fetchTxs, dropPeer, mclock.System{}, nil)
+	instance := NewTxFetcherForTests(hasTx, addTxs, fetchTxs, dropPeer, mclock.System{}, nil)
+	var v uint64
+	instance.totalAddTx.Store(&v)
+	return instance
+}
+
+func (f *TxFetcher) Enqueue1(peer *eth.Peer, txs []*types.Transaction, direct bool) error {
+	var (
+		inMeter          = txReplyInMeter
+		knownMeter       = txReplyKnownMeter
+		underpricedMeter = txReplyUnderpricedMeter
+		otherRejectMeter = txReplyOtherRejectMeter
+	)
+	if !direct {
+		inMeter = txBroadcastInMeter
+		knownMeter = txBroadcastKnownMeter
+		underpricedMeter = txBroadcastUnderpricedMeter
+		otherRejectMeter = txBroadcastOtherRejectMeter
+	}
+	// Keep track of all the propagated transactions
+	inMeter.Mark(int64(len(txs)))
+
+	// Push all the transactions into the pool, tracking underpriced ones to avoid
+	// re-requesting them and dropping the peer in case of malicious transfers.
+	var (
+		added = make([]common.Hash, 0, len(txs))
+		metas = make([]txMetadata, 0, len(txs))
+	)
+	// proceed in batches
+	for i := 0; i < len(txs); i += 128 {
+		end := i + 128
+		if end > len(txs) {
+			end = len(txs)
+		}
+		var (
+			duplicate   int64
+			underpriced int64
+			otherreject int64
+			valid       int64
+		)
+		batch := txs[i:end]
+		for j, err := range f.addTxs(peer.ID(), batch) {
+			// Track the transaction hash if the price is too low for us.
+			// Avoid re-request this transaction when we receive another
+			// announcement.
+			if errors.Is(err, txpool.ErrUnderpriced) || errors.Is(err, txpool.ErrReplaceUnderpriced) {
+				f.underpriced.Add(batch[j].Hash(), batch[j].Time())
+			}
+			// Track a few interesting failure types
+			switch {
+			case err == nil: // Noop, but need to handle to not count these
+				valid++
+
+			case errors.Is(err, txpool.ErrAlreadyKnown):
+				duplicate++
+
+			case errors.Is(err, txpool.ErrUnderpriced) || errors.Is(err, txpool.ErrReplaceUnderpriced):
+				underpriced++
+
+			default:
+				otherreject++
+			}
+			added = append(added, batch[j].Hash())
+			metas = append(metas, txMetadata{
+				kind: batch[j].Type(),
+				size: uint32(batch[j].Size()),
+			})
+		}
+		knownMeter.Mark(duplicate)
+		underpricedMeter.Mark(underpriced)
+		otherRejectMeter.Mark(otherreject)
+		//成功添加tx到txpool,则更新最新的msg时间
+		if valid > 0 {
+			peer.LastMsgTime = time.Now().Unix()
+		}
+		// If 'other reject' is >25% of the deliveries in any batch, sleep a bit.
+		if otherreject > 128/4 {
+			time.Sleep(200 * time.Millisecond)
+			log.Debug("Peer delivering stale transactions", "peer", peer, "rejected", otherreject)
+		}
+	}
+	select {
+	case f.cleanup <- &txDelivery{origin: peer.ID(), hashes: added, metas: metas, direct: direct}:
+		return nil
+	case <-f.quit:
+		return errTerminated
+	}
 }
 
 // NewTxFetcherForTests is a testing method to mock out the realtime clock with

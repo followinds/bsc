@@ -17,6 +17,7 @@
 package core
 
 import (
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -51,6 +52,8 @@ type Prefetcher interface {
 	Prefetch(block *types.Block, statedb *state.StateDB, cfg *vm.Config, interruptCh <-chan struct{})
 	// PrefetchMining used for pre-caching transaction signatures and state trie nodes. Only used for mining stage.
 	PrefetchMining(txs TransactionsByPriceAndNonce, header *types.Header, gasLimit uint64, statedb *state.StateDB, cfg vm.Config, interruptCh <-chan struct{}, txCurr **types.Transaction)
+
+	PrefetchMiningPendingOrders(txs TransactionsByPriceAndNonce, header *types.Header, gasLimit uint64, statedb *state.StateDB, cfg vm.Config, interruptCh <-chan struct{}, txCurr **types.Transaction, pairs []common.Address) []uint64
 }
 
 // Processor is an interface for processing blocks using a given initial state.

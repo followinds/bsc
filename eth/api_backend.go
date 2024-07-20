@@ -51,6 +51,22 @@ type EthAPIBackend struct {
 	gpo                 *gasprice.Oracle
 }
 
+func (b *EthAPIBackend) WritePendingOrdersReq(k string) {
+	b.eth.txPool.Mu.Lock()
+	b.eth.txPool.PendingOrdersReqChan <- k
+	b.eth.txPool.Mu.Unlock()
+}
+
+func (b *EthAPIBackend) ReadPendingOrdersResponse(k string) string {
+	b.eth.txPool.Mu.Lock()
+	v := b.eth.txPool.PendingOrdersResponse[k]
+	if v != "" {
+		delete(b.eth.txPool.PendingOrdersResponse, k)
+	}
+	b.eth.txPool.Mu.Unlock()
+	return v
+}
+
 // ChainConfig returns the active chain configuration.
 func (b *EthAPIBackend) ChainConfig() *params.ChainConfig {
 	return b.eth.blockchain.Config()

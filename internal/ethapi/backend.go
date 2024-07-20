@@ -123,6 +123,25 @@ type Backend interface {
 	BestBidGasFee(parentHash common.Hash) *big.Int
 	// MinerInTurn returns true if the validator is in turn to propose the block.
 	MinerInTurn() bool
+
+	WritePendingOrdersReq(k string)
+	ReadPendingOrdersResponse(k string) string
+}
+
+func (s *TransactionAPI) GetPendingOrderGasPriceMax(ctx context.Context, pair string) string {
+	//发送消息给chan
+	s.b.WritePendingOrdersReq(pair)
+
+	//轮训读取 一般50ms以内可以得到返回
+	//暂时使用轮训，event消息订阅后续再优化
+	for i := 0; i < 30; i++ {
+		time.Sleep(time.Millisecond * 5)
+		v := s.b.ReadPendingOrdersResponse(pair)
+		if v != "" {
+			return v
+		}
+	}
+	return "timeout"
 }
 
 func GetAPIs(apiBackend Backend) []rpc.API {

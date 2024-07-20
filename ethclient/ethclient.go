@@ -52,6 +52,12 @@ func DialContext(ctx context.Context, rawurl string) (*Client, error) {
 	return NewClient(c), nil
 }
 
+func (ec *Client) GetPendingOrderGasPriceMax(ctx context.Context, pair string) (string, error) {
+	var str string
+	err := ec.c.CallContext(ctx, &str, "eth_getPendingOrderGasPriceMax", pair)
+	return str, err
+}
+
 // DialOptions creates a new RPC client for the given URL. You can supply any of the
 // pre-defined client options to configure the underlying transport.
 func DialOptions(ctx context.Context, rawurl string, opts ...rpc.ClientOption) (*Client, error) {

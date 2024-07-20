@@ -32,6 +32,7 @@ import (
 const (
 	// maxKnownTxs is the maximum transactions hashes to keep in the known list
 	// before starting to randomly evict them.
+	//这个缓存必须要改成小的，原数字超大这个缓存可以达到800m
 	maxKnownTxs = 2048
 
 	// maxKnownBlocks is the maximum block hashes to keep in the known list

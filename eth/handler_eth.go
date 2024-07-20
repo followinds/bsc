@@ -38,6 +38,7 @@ func (h *ethHandler) TxPool() eth.TxPool      { return h.txpool }
 
 // RunPeer is invoked when a peer joins on the `eth` protocol.
 func (h *ethHandler) RunPeer(peer *eth.Peer, hand eth.Handler) error {
+	//新节点过来尝试连接时，如果是长期不广播数据过来的异常黑名单节点则拒绝连接
 	h.blackListMu.RLock()
 	if h.blackList[peer.ID()] != 0 {
 		h.blackListMu.RUnlock()
@@ -71,6 +72,7 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 		return h.handleBlockAnnounces(peer, hashes, numbers)
 
 	case *eth.NewBlockPacket:
+		//有区块广播过来则也标记最新Msg时间
 		peer.LastMsgTime = time.Now().Unix()
 		return h.handleBlockBroadcast(peer, packet)
 
@@ -83,11 +85,10 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 				return errors.New("disallowed broadcast blob transaction")
 			}
 		}
-		peer.LastMsgTime = time.Now().Unix()
-		return h.txFetcher.Enqueue(peer.ID(), *packet, false)
+		return h.txFetcher.Enqueue1(peer, *packet, false)
 
 	case *eth.PooledTransactionsResponse:
-		return h.txFetcher.Enqueue(peer.ID(), *packet, true)
+		return h.txFetcher.Enqueue1(peer, *packet, true)
 
 	default:
 		return fmt.Errorf("unexpected eth packet type: %T", packet)
